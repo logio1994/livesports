@@ -1,0 +1,211 @@
+import tkinter as tk
+from tkinter import messagebox
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import pandas as pd
+import os
+import time
+import threading
+import queue
+
+# Lista do przechowywania wyników (globalnie)
+match_data = []
+
+# Konfiguracja opcji przeglądarki Chrome
+chrome_options = webdriver.ChromeOptions()
+# Dodanie linii wyłączających ładowanie obrazów – przyspiesza działanie strony
+prefs = {"profile.managed_default_content_settings.images": 2}
+chrome_options.add_experimental_option("prefs", prefs)
+
+def get_team_names(driver):
+    try:
+        # Pobranie nazwy drużyny gospodarza (pierwszy element o klasie 'ls')
+        home_team = driver.find_element(By.XPATH, "//span[@class='ls']").text.strip()
+        print(f"🏠 Gospodarz: {home_team}")
+
+        # Pobranie nazwy drużyny gościa (drugi element o klasie 'ls')
+        away_team = driver.find_elements(By.XPATH, "//span[@class='ls']")[1].text.strip()
+        print(f"🚀 Gość: {away_team}")
+
+        return home_team, away_team
+    except Exception as e:
+        print(f"⚠️ Błąd podczas pobierania drużyn: {e}")
+        return None, None
+
+def accept_cookies(driver):
+    try:
+        cookies_btn = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, 'onetrust-accept-btn-handler'))
+        )
+        cookies_btn.click()
+        print("✅ Ciasteczka zaakceptowane")
+    except Exception as e:
+        print("⚠️ Brak okna cookies – przechodzę dalej")
+
+def open_table_tab(driver):
+    try:
+        table_link = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, 'table'))
+        )
+        driver.execute_script("arguments[0].click();", table_link)
+        print("📊 Kliknięto w zakładkę Tabela")
+    except Exception as e:
+        print(f"⚠️ Błąd podczas klikania w Tabela: {e}")
+
+def get_home_stats(driver, home_team):
+    try:
+        # Kliknij w zakładkę Home
+        home_tab = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, 'home__tab'))
+        )
+        driver.execute_script("arguments[0].click();", home_tab)
+        print(f"🏠 Kliknięto zakładkę Home dla drużyny {home_team}")
+        # Poczekaj aż URL zawiera parametr tab=table-home
+        WebDriverWait(driver, 5).until(lambda d: "tab=table-home" in d.current_url)
+
+        # XPath do statystyk gospodarza
+        xpath_played = f"//td[@class='Ff' and contains(@data-testid, '{home_team}__league-column__played')]"
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, xpath_played)))
+        matches_played = driver.find_element(By.XPATH, xpath_played).text.strip()
+
+        xpath_goalsFor = f"//td[@class='Ff' and contains(@data-testid, '{home_team}__league-column__goalsFor')]"
+        goals_scored = driver.find_element(By.XPATH, xpath_goalsFor).text.strip()
+
+        xpath_goalsAgainst = f"//td[@class='Ff' and contains(@data-testid, '{home_team}__league-column__goalsAgainst')]"
+        goals_against = driver.find_element(By.XPATH, xpath_goalsAgainst).text.strip()
+
+        print(f"🏠 {home_team} - Mecze: {matches_played}, Bramki strzelone: {goals_scored}, Bramki stracone: {goals_against}")
+        return matches_played, goals_scored, goals_against
+
+    except Exception as e:
+        print(f"⚠️ Błąd podczas pobierania statystyk dla gospodarza {home_team}: {e}")
+        return "Błąd", "Błąd", "Błąd"
+
+def get_away_stats(driver, away_team):
+    try:
+        # Kliknij w zakładkę Away
+        away_tab = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.ID, 'away__tab'))
+        )
+        driver.execute_script("arguments[0].click();", away_tab)
+        print(f"🚀 Kliknięto zakładkę Away dla drużyny {away_team}")
+        # Poczekaj aż URL zawiera parametr tab=table-away
+        WebDriverWait(driver, 5).until(lambda d: "tab=table-away" in d.current_url)
+
+        # XPath do statystyk gościa
+        xpath_played = f"//td[@class='Ff' and contains(@data-testid, '{away_team}__league-column__played')]"
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, xpath_played)))
+        matches_played = driver.find_element(By.XPATH, xpath_played).text.strip()
+
+        xpath_goalsFor = f"//td[@class='Ff' and contains(@data-testid, '{away_team}__league-column__goalsFor')]"
+        goals_scored = driver.find_element(By.XPATH, xpath_goalsFor).text.strip()
+
+        xpath_goalsAgainst = f"//td[@class='Ff' and contains(@data-testid, '{away_team}__league-column__goalsAgainst')]"
+        goals_against = driver.find_element(By.XPATH, xpath_goalsAgainst).text.strip()
+
+        print(f"🚀 {away_team} - Mecze: {matches_played}, Bramki strzelone: {goals_scored}, Bramki stracone: {goals_against}")
+        return matches_played, goals_scored, goals_against
+
+    except Exception as e:
+        print(f"⚠️ Błąd podczas pobierania statystyk dla gościa {away_team}: {e}")
+        return "Błąd", "Błąd", "Błąd"
+
+def save_to_excel(data):
+    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+    file_path = os.path.join(desktop_path, "dane_meczu.xlsx")
+    df = pd.DataFrame(data, columns=["Drużyna", "Mecze", "Bramki Strzelone", "Bramki Stracone"])
+    df.to_excel(file_path, index=False)
+    print(f"📊 Dane zapisane do pliku: {file_path}")
+
+def cookies_watcher(driver):
+    while True:
+        try:
+            cookie_button = driver.find_element(By.ID, 'onetrust-accept-btn-handler')
+            if cookie_button.is_displayed():
+                cookie_button.click()
+                print("🛡️ Watcher: Cookies zaakceptowane.")
+                time.sleep(1)
+        except:
+            pass
+        time.sleep(2)
+
+
+def process_link(index, link, result_queue):
+    driver = webdriver.Chrome(options=chrome_options)
+    print(f"🔗 Przetwarzanie linku nr {index + 1}: {link}")
+    driver.get(link)
+
+    # Uruchamiamy w tle "watchera" od ciasteczek
+    threading.Thread(target=cookies_watcher, args=(driver,), daemon=True).start()
+
+    accept_cookies(driver)  # Zostawiamy też wstępne sprawdzenie
+
+    home_team, away_team = get_team_names(driver)
+    result = []
+    if home_team and away_team:
+        open_table_tab(driver)
+        home_stats = get_home_stats(driver, home_team)
+        away_stats = get_away_stats(driver, away_team)
+        result = [
+            [home_team, home_stats[0], home_stats[1], home_stats[2]],
+            [away_team, away_stats[0], away_stats[1], away_stats[2]]
+        ]
+    driver.quit()
+    result_queue.put((index, result))
+    print(f"✅ Link nr {index + 1} przetworzony.")
+
+
+def process_links():
+    links = text_box.get("1.0", "end-1c").strip().splitlines()
+    if not links:
+        messagebox.showwarning("Błąd", "Proszę wprowadzić przynajmniej jeden link!")
+        return
+
+    result_queue = queue.Queue()
+    threads = []
+    max_threads = 3
+
+    # Uruchom wątki dla każdego linku, ale jednocześnie nie więcej niż max_threads
+    for index, link in enumerate(links):
+        t = threading.Thread(target=process_link, args=(index, link, result_queue))
+        threads.append(t)
+        t.start()
+        # Jeśli osiągniemy limit jednoczesnych wątków, czekamy na ich zakończenie
+        if len(threads) >= max_threads:
+            for th in threads:
+                th.join()
+            threads = []
+
+    # Dołącz pozostałe wątki
+    for t in threads:
+        t.join()
+
+    # Zbieramy wyniki z kolejki i sortujemy po indeksie
+    results = []
+    while not result_queue.empty():
+        results.append(result_queue.get())
+    results.sort(key=lambda x: x[0])
+
+    # Łączymy wyniki (każdy link generuje dwie linie)
+    match_data.clear()
+    for idx, data in results:
+        match_data.extend(data)
+
+    save_to_excel(match_data)
+
+# Tworzenie okna GUI
+root = tk.Tk()
+root.title("Wprowadź Linki")
+
+label = tk.Label(root, text="Wklej linki (każdy w nowej linii):")
+label.pack(pady=10)
+
+text_box = tk.Text(root, height=10, width=50)
+text_box.pack(pady=10)
+
+process_button = tk.Button(root, text="Przetwórz linki", command=process_links)
+process_button.pack(pady=20)
+
+root.mainloop()
